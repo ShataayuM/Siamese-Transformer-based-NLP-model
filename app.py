@@ -32,46 +32,39 @@ COUNTRY_MAP = {
 }
 NEWS_CATEGORIES = ['business', 'entertainment', 'general', 'health', 'science', 'sports', 'technology']
 
-# --- 2. Model Loading and Architecture (Simplified for Deployment) ---
+# --- 2. Model Loading and Architecture (Using Keras Subclassing) ---
 @st.cache_resource
 def load_model_and_tokenizer():
     """
-    Loads a robust, pre-trained model for deployment.
-    This bypasses the issues with loading the custom fine-tuned model.
+    Loads a robust, pre-trained model for deployment using the Keras Subclassing API.
     """
-    def build_stable_siamese_model():
-        # Define the inputs
-        input_ids1 = tf.keras.layers.Input(shape=(None,), dtype=tf.int32, name='input_ids_1')
-        attention_mask1 = tf.keras.layers.Input(shape=(None,), dtype=tf.int32, name='attention_mask_1')
-        input_ids2 = tf.keras.layers.Input(shape=(None,), dtype=tf.int32, name='input_ids_2')
-        attention_mask2 = tf.keras.layers.Input(shape=(None,), dtype=tf.int32, name='attention_mask_2')
+    # -- Build a stable Siamese Model using Subclassing --
+    class SiameseModel(tf.keras.Model):
+        def __init__(self, model_name="distilbert-base-uncased", **kwargs):
+            super().__init__(**kwargs)
+            # The encoder is a core component of our model
+            self.encoder = TFAutoModel.from_pretrained(model_name, from_pt=True)
+            # The layer to calculate similarity
+            self.dot = tf.keras.layers.Dot(axes=1, normalize=True)
 
-        # Load the powerful pre-trained DistilBERT model
-        base_model = TFAutoModel.from_pretrained("distilbert-base-uncased", from_pt=True)
-        
-        # Create a reusable encoder sub-model
-        encoder_input_ids = tf.keras.layers.Input(shape=(None,), dtype=tf.int32)
-        encoder_attention_mask = tf.keras.layers.Input(shape=(None,), dtype=tf.int32)
-        # Pass inputs as a dictionary
-        encoder_output = base_model({'input_ids': encoder_input_ids, 'attention_mask': encoder_attention_mask}).last_hidden_state
-        # Use the CLS token's output for the sentence embedding
-        embedding_output = encoder_output[:, 0, :]
-        encoder = tf.keras.Model(inputs=[encoder_input_ids, encoder_attention_mask], outputs=embedding_output, name="sentence_encoder")
-        
-        # Get embeddings for both sentences
-        embedding1 = encoder([input_ids1, attention_mask1])
-        embedding2 = encoder([input_ids2, attention_mask2])
+        def call(self, inputs):
+            # Unpack the four inputs
+            input_ids1, attention_mask1, input_ids2, attention_mask2 = inputs
+            
+            # Get the embeddings for the first sentence
+            outputs1 = self.encoder({'input_ids': input_ids1, 'attention_mask': attention_mask1})
+            embedding1 = outputs1.last_hidden_state[:, 0, :] # Use CLS token
 
-        # Calculate similarity
-        similarity_output = tf.keras.layers.Dot(axes=1, normalize=True)([embedding1, embedding2])
-        
-        # Build the final model
-        model = tf.keras.Model(inputs=[input_ids1, attention_mask1, input_ids2, attention_mask2], outputs=similarity_output)
-        return model
+            # Get the embeddings for the second sentence
+            outputs2 = self.encoder({'input_ids': input_ids2, 'attention_mask': attention_mask2})
+            embedding2 = outputs2.last_hidden_state[:, 0, :] # Use CLS token
+            
+            # Calculate and return the cosine similarity
+            return self.dot([embedding1, embedding2])
 
     try:
-        # We build the stable model and DO NOT load custom weights
-        model = build_stable_siamese_model()
+        # We instantiate our new, stable model class
+        model = SiameseModel()
         tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
         return model, tokenizer
     except Exception as e:
@@ -143,10 +136,13 @@ if siamese_model and tokenizer:
                     ref_headline_list = [headline] * len(fetched_headlines)
                     inputs_ref = preprocess(ref_headline_list, tokenizer)
                     inputs_test = preprocess(fetched_headlines, tokenizer)
+                    
+                    # The inputs are now a list of tensors for the subclassed model
                     predictions = siamese_model.predict([
                         inputs_ref['input_ids'], inputs_ref['attention_mask'],
                         inputs_test['input_ids'], inputs_test['attention_mask']
                     ], verbose=0)
+                    
                     scores = predictions.flatten()
                     best_score_index = np.argmax(scores)
                     best_score = scores[best_score_index]
