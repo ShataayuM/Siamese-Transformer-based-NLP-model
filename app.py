@@ -5,15 +5,16 @@ import json
 import tensorflow as tf
 from transformers import AutoTokenizer, TFAutoModel
 import numpy as np
+import re
 
 # --- 0. Page Configuration ---
 st.set_page_config(
-    page_title="Headline Verifier",
+    page_title="Ethical Lens",
     page_icon="📰",
     layout="centered"
 )
 
-# --- 1. Country Name to Code Mapping ---
+# --- 1. Constants and Mappings ---
 COUNTRY_MAP = {
     'Argentina': 'ar', 'Australia': 'au', 'Austria': 'at', 'Belgium': 'be',
     'Brazil': 'br', 'Bulgaria': 'bg', 'Canada': 'ca', 'China': 'cn',
@@ -31,19 +32,16 @@ COUNTRY_MAP = {
     'United Kingdom': 'gb', 'USA': 'us', 'Venezuela': 've'
 }
 NEWS_CATEGORIES = ['business', 'entertainment', 'general', 'health', 'science', 'sports', 'technology']
+STOP_WORDS = {'a', 'an', 'the', 'is', 'in', 'on', 'of', 'for', 'to', 'with', 'and', 'vs', 'highlights', 'final', 'live'}
 
 # --- 2. Model Loading and Architecture (Using Keras Subclassing) ---
 @st.cache_resource
 def load_model_and_tokenizer():
-    """
-    Loads a robust, pre-trained model for deployment using the Keras Subclassing API.
-    """
     class SiameseModel(tf.keras.Model):
         def __init__(self, model_name="distilbert-base-uncased", **kwargs):
             super().__init__(**kwargs)
             self.encoder = TFAutoModel.from_pretrained(model_name, from_pt=True)
             self.dot = tf.keras.layers.Dot(axes=1, normalize=True)
-
         def call(self, inputs):
             input_ids1, attention_mask1, input_ids2, attention_mask2 = inputs
             outputs1 = self.encoder({'input_ids': input_ids1, 'attention_mask': attention_mask1})
@@ -51,7 +49,6 @@ def load_model_and_tokenizer():
             outputs2 = self.encoder({'input_ids': input_ids2, 'attention_mask': attention_mask2})
             embedding2 = outputs2.last_hidden_state[:, 0, :]
             return self.dot([embedding1, embedding2])
-
     try:
         model = SiameseModel()
         tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
@@ -66,40 +63,43 @@ def preprocess(texts, tokenizer):
 
 def build_response(original, compared, score, article_meta=None):
     timestamp = datetime.datetime.utcnow().isoformat() + "Z"
-    # Use a high threshold for the powerful pre-trained model to ensure accuracy
     is_verified = score > 0.9 
     return {
         "verdict": "VERIFIED" if is_verified else "MISINFORMATION",
         "status": "✅ Verified" if is_verified else "🚫 Likely False / Misinformation",
-        "confidence_score": float(round(score, 2)),
-        "similarity_score": float(round(score, 2)),
-        "evidence": [{
-            "source": article_meta.get("source", {}).get("name") if is_verified and article_meta else "No reliable match",
-            "url": article_meta.get("url") if is_verified and article_meta else None,
-            "snippet": (article_meta.get("description") or "")[:150] if is_verified and article_meta else "No corroborating reports found."
-        }],
-        "original_headline": original,
-        "compared_headline": compared if is_verified else "N/A",
+        "confidence_score": float(round(score, 2)), "similarity_score": float(round(score, 2)),
+        "evidence": [{"source": article_meta.get("source", {}).get("name") if is_verified and article_meta else "No reliable match",
+                      "url": article_meta.get("url") if is_verified and article_meta else None,
+                      "snippet": (article_meta.get("description") or "")[:150] if is_verified and article_meta else "No corroborating reports found."}],
+        "original_headline": original, "compared_headline": compared if is_verified else "N/A",
         "processed_at": timestamp
     }
 
+def extract_keywords(headline):
+    """Extracts important keywords from a headline for a better search query."""
+    # Use regex to find words, ignoring punctuation
+    words = re.findall(r'\b\w+\b', headline.lower())
+    keywords = [word for word in words if word not in STOP_WORDS]
+    # Join the most important 5-6 keywords
+    return " AND ".join(keywords[:6])
+
 # --- 4. Main Application UI ---
-st.title("📰 Headline Verification System")
+st.title("📰 Ethical Lens")
 st.markdown("Enter a news headline to check its authenticity against recent articles from trusted sources.")
+st.info("ℹ️ Please note: This tool can only verify news published within the last 30 days.", icon="ℹ️")
 
 siamese_model, tokenizer = load_model_and_tokenizer()
 
 if siamese_model and tokenizer:
     with st.form("verify_form"):
-        headline = st.text_area("Headline to Verify", "", placeholder="e.g., New study shows coffee cures all diseases.")
-        # Country and PageSize are no longer used in the main API call but kept for UI consistency
+        headline = st.text_area("Headline to Verify", "", placeholder="e.g., India vs Korea, Hockey Asia Cup 2025 Final Highlights: India beat Korea 4-1 to win Asia Cup, qualify for World Cup")
         col1, col2, col3 = st.columns(3)
         with col1:
-            country = st.selectbox("Country (for context)", options=sorted(COUNTRY_MAP.keys()), index=list(sorted(COUNTRY_MAP.keys())).index('USA'))
+            country = st.selectbox("Country", options=sorted(COUNTRY_MAP.keys()), index=list(sorted(COUNTRY_MAP.keys())).index('India'))
         with col2:
-            category = st.selectbox("Category (for context)", options=NEWS_CATEGORIES, index=2)
+            category = st.selectbox("Category", options=NEWS_CATEGORIES, index=list(NEWS_CATEGORIES).index('sports'))
         with col3:
-            page_size = st.number_input("Articles to check", min_value=5, max_value=100, value=20, step=5)
+            page_size = st.number_input("Articles to check (per search)", min_value=10, max_value=50, value=25, step=5)
         
         submitted = st.form_submit_button("Analyze Headline")
 
@@ -107,31 +107,37 @@ if siamese_model and tokenizer:
         if not headline.strip():
             st.warning("Please enter a headline to verify.")
         else:
-            with st.spinner('🔎 Analyzing... Searching all news sources...'):
-                # --- A. Fetch News using the more powerful /everything endpoint ---
+            with st.spinner('🔎 Analyzing... Searching news sources...'):
                 API_KEY = "21d6501d58264ca79e8490881db2ed61"
+                search_keywords = extract_keywords(headline)
                 
-                # --- *** THE FIX IS HERE: A single, powerful search *** ---
-                # We use the /everything endpoint as it's best for finding specific articles.
-                # The user's headline itself becomes the search query 'q'.
-                URL = "https://newsapi.org/v2/everything"
-                params = {
-                    "q": headline, 
-                    "searchIn": "title", # Focus the search on headlines for relevance
-                    "pageSize": page_size, 
-                    "language": "en", # Search for English articles
-                    "sortBy": "relevancy", # Get the most relevant articles first
-                    "apiKey": API_KEY
-                }
-                
-                articles = []
+                # --- *** THE FIX IS HERE: Cascading Search Logic *** ---
+                all_articles = []
                 try:
-                    response = requests.get(URL, params=params)
-                    response.raise_for_status()
-                    articles = response.json().get("articles", [])
+                    # 1. Broad search on /everything with keywords
+                    URL_everything = "https://newsapi.org/v2/everything"
+                    params_everything = {"q": search_keywords, "searchIn": "title", "pageSize": page_size, "language": "en", "sortBy": "relevancy", "apiKey": API_KEY}
+                    response_everything = requests.get(URL_everything, params=params_everything)
+                    response_everything.raise_for_status()
+                    all_articles.extend(response_everything.json().get("articles", []))
+
+                    # 2. Targeted search on /top-headlines for the specific country/category
+                    URL_top = "https://newsapi.org/v2/top-headlines"
+                    country_code = COUNTRY_MAP[country]
+                    params_top = {"country": country_code, "category": category, "q": search_keywords, "pageSize": page_size, "apiKey": API_KEY}
+                    response_top = requests.get(URL_top, params=params_top)
+                    response_top.raise_for_status()
+                    all_articles.extend(response_top.json().get("articles", []))
                 
                 except requests.exceptions.RequestException as e:
                     st.error(f"Could not connect to NewsAPI: {e}")
+
+                # Remove duplicates based on URL
+                if all_articles:
+                    unique_articles = {article['url']: article for article in all_articles}.values()
+                    articles = list(unique_articles)
+                else:
+                    articles = []
 
                 if not articles:
                     st.warning("Could not find any matching articles in trusted sources.")
