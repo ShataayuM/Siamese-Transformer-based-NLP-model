@@ -1,9 +1,8 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
 streamlit
 tensorflow
 transformers
 requests
-
 numpy
 tf-keras
 torch
-
