@@ -108,17 +108,14 @@ if siamese_model and tokenizer:
                 API_KEY = "21d6501d58264ca79e8490881db2ed61"
                 country_code = COUNTRY_MAP[country]
                 
-                # --- Two-Step Search for better accuracy ---
                 articles = []
                 try:
-                    # 1. First, try a targeted search using the user's query
                     URL1 = "https://newsapi.org/v2/top-headlines"
                     params1 = { "country": country_code, "category": category, "q": headline, "pageSize": page_size, "apiKey": API_KEY }
                     response1 = requests.get(URL1, params=params1)
                     response1.raise_for_status()
                     articles.extend(response1.json().get("articles", []))
 
-                    # 2. If we get few results, broaden the search
                     if len(articles) < 5:
                         URL2 = "https://newsapi.org/v2/everything"
                         params2 = { "q": headline, "searchIn": "title", "pageSize": page_size, "apiKey": API_KEY }
@@ -129,7 +126,6 @@ if siamese_model and tokenizer:
                 except requests.exceptions.RequestException as e:
                     st.error(f"Could not connect to NewsAPI: {e}")
 
-                # Remove duplicates if any
                 if articles:
                     unique_articles = {article['url']: article for article in articles}.values()
                     articles = list(unique_articles)
