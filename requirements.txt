@@ -2,4 +2,6 @@ streamlit
 tensorflow
 transformers
 requests
+
 numpy
+tf-keras
