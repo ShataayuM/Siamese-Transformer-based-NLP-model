@@ -1,0 +1,5 @@
+streamlit
+tensorflow
+transformers
+requests
+numpy
