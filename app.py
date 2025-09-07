@@ -38,32 +38,21 @@ def load_model_and_tokenizer():
     """
     Loads a robust, pre-trained model for deployment using the Keras Subclassing API.
     """
-    # -- Build a stable Siamese Model using Subclassing --
     class SiameseModel(tf.keras.Model):
         def __init__(self, model_name="distilbert-base-uncased", **kwargs):
             super().__init__(**kwargs)
-            # The encoder is a core component of our model
             self.encoder = TFAutoModel.from_pretrained(model_name, from_pt=True)
-            # The layer to calculate similarity
             self.dot = tf.keras.layers.Dot(axes=1, normalize=True)
 
         def call(self, inputs):
-            # Unpack the four inputs
             input_ids1, attention_mask1, input_ids2, attention_mask2 = inputs
-            
-            # Get the embeddings for the first sentence
             outputs1 = self.encoder({'input_ids': input_ids1, 'attention_mask': attention_mask1})
-            embedding1 = outputs1.last_hidden_state[:, 0, :] # Use CLS token
-
-            # Get the embeddings for the second sentence
+            embedding1 = outputs1.last_hidden_state[:, 0, :]
             outputs2 = self.encoder({'input_ids': input_ids2, 'attention_mask': attention_mask2})
-            embedding2 = outputs2.last_hidden_state[:, 0, :] # Use CLS token
-            
-            # Calculate and return the cosine similarity
+            embedding2 = outputs2.last_hidden_state[:, 0, :]
             return self.dot([embedding1, embedding2])
 
     try:
-        # We instantiate our new, stable model class
         model = SiameseModel()
         tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
         return model, tokenizer
@@ -77,8 +66,7 @@ def preprocess(texts, tokenizer):
 
 def build_response(original, compared, score, article_meta=None):
     timestamp = datetime.datetime.utcnow().isoformat() + "Z"
-    # Adjusting threshold for pre-trained model which gives a wider range of scores
-    is_verified = score > 0.8 
+    is_verified = score > 0.8
     return {
         "verdict": "VERIFIED" if is_verified else "MISINFORMATION",
         "status": "✅ Verified" if is_verified else "🚫 Likely False / Misinformation",
@@ -116,20 +104,38 @@ if siamese_model and tokenizer:
         if not headline.strip():
             st.warning("Please enter a headline to verify.")
         else:
-            with st.spinner('🔎 Analyzing...'):
-                country_code = COUNTRY_MAP[country]
+            with st.spinner('🔎 Analyzing... Searching news sources...'):
                 API_KEY = "21d6501d58264ca79e8490881db2ed61"
-                params = {"country": country_code, "category": category, "pageSize": page_size, "apiKey": API_KEY}
+                country_code = COUNTRY_MAP[country]
+                
+                # --- Two-Step Search for better accuracy ---
+                articles = []
                 try:
-                    response = requests.get("https://newsapi.org/v2/top-headlines", params=params)
-                    response.raise_for_status()
-                    articles = response.json().get("articles", [])
+                    # 1. First, try a targeted search using the user's query
+                    URL1 = "https://newsapi.org/v2/top-headlines"
+                    params1 = { "country": country_code, "category": category, "q": headline, "pageSize": page_size, "apiKey": API_KEY }
+                    response1 = requests.get(URL1, params=params1)
+                    response1.raise_for_status()
+                    articles.extend(response1.json().get("articles", []))
+
+                    # 2. If we get few results, broaden the search
+                    if len(articles) < 5:
+                        URL2 = "https://newsapi.org/v2/everything"
+                        params2 = { "q": headline, "searchIn": "title", "pageSize": page_size, "apiKey": API_KEY }
+                        response2 = requests.get(URL2, params=params2)
+                        response2.raise_for_status()
+                        articles.extend(response2.json().get("articles", []))
+                
                 except requests.exceptions.RequestException as e:
                     st.error(f"Could not connect to NewsAPI: {e}")
-                    articles = []
+
+                # Remove duplicates if any
+                if articles:
+                    unique_articles = {article['url']: article for article in articles}.values()
+                    articles = list(unique_articles)
 
                 if not articles:
-                    st.warning("Could not fetch any articles for the given criteria.")
+                    st.warning("Could not find any matching articles in trusted sources.")
                     result = build_response(headline, "", 0.0)
                 else:
                     fetched_headlines = [article['title'] for article in articles]
@@ -137,7 +143,6 @@ if siamese_model and tokenizer:
                     inputs_ref = preprocess(ref_headline_list, tokenizer)
                     inputs_test = preprocess(fetched_headlines, tokenizer)
                     
-                    # The inputs are now a list of tensors for the subclassed model
                     predictions = siamese_model.predict([
                         inputs_ref['input_ids'], inputs_ref['attention_mask'],
                         inputs_test['input_ids'], inputs_test['attention_mask']
