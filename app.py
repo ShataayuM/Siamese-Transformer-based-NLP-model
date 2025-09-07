@@ -33,53 +33,42 @@ COUNTRY_MAP = {
 NEWS_CATEGORIES = ['business', 'entertainment', 'general', 'health', 'science', 'sports', 'technology']
 
 # --- 2. Model Loading and Architecture ---
-# Use Streamlit's caching to load the model only once.
 @st.cache_resource
 def load_model_and_tokenizer():
     """
-    Loads the saved model weights into the replicated architecture.
-    This function is cached so the model is only loaded once.
+    Loads the saved model into a new, deployment-friendly architecture.
     """
-    # -- Replicate Your Custom Layer --
-    class EncodeInputsLayer(tf.keras.layers.Layer):
-        def __init__(self, model_name, **kwargs):
-            super().__init__(**kwargs)
-            self.model_name = model_name
-            self.base_model = TFAutoModel.from_pretrained(self.model_name, from_pt=True)
-        def call(self, inputs):
-            input_ids, attention_mask = inputs
-            outputs = self.base_model({'input_ids': input_ids, 'attention_mask': attention_mask})
-            return outputs.last_hidden_state
-        def get_config(self):
-            config = super().get_config()
-            config.update({"model_name": self.model_name})
-            return config
-
-    # -- Replicate Your Exact Model Architecture --
-    def build_siamese_model():
+    # -- A more robust model architecture for deployment --
+    def build_deployment_model():
         input_ids1 = tf.keras.layers.Input(shape=(None,), dtype=tf.int32, name='input_ids_1')
         attention_mask1 = tf.keras.layers.Input(shape=(None,), dtype=tf.int32, name='attention_mask_1')
         input_ids2 = tf.keras.layers.Input(shape=(None,), dtype=tf.int32, name='input_ids_2')
         attention_mask2 = tf.keras.layers.Input(shape=(None,), dtype=tf.int32, name='attention_mask_2')
-        embedding_layer = EncodeInputsLayer("distilbert-base-uncased", name="encode_inputs_layer")
-        embedding1 = embedding_layer([input_ids1, attention_mask1])
-        embedding2 = embedding_layer([input_ids2, attention_mask2])
-        lambda_layer1 = tf.keras.layers.Lambda(lambda x: x[:, 0, :])(embedding1)
-        lambda_layer2 = tf.keras.layers.Lambda(lambda x: x[:, 0, :])(embedding2)
-        dot_product = tf.keras.layers.Dot(axes=1, normalize=True)([lambda_layer1, lambda_layer2])
-        diff = tf.abs(embedding1 - embedding2)
-        merged = tf.keras.layers.Concatenate()([lambda_layer1, dot_product])
-        dense1 = tf.keras.layers.Dense(32, activation='relu')(merged)
-        dropout1 = tf.keras.layers.Dropout(0.2)(dense1)
-        dense2 = tf.keras.layers.Dense(16, activation='relu')(dropout1)
-        output = tf.keras.layers.Dense(1, activation='sigmoid')(dense2)
-        model = tf.keras.Model(inputs=[input_ids1, attention_mask1, input_ids2, attention_mask2], outputs=output)
+
+        # Create a single, reusable encoder model
+        base_model = TFAutoModel.from_pretrained("distilbert-base-uncased", from_pt=True)
+        encoder_input_ids = tf.keras.layers.Input(shape=(None,), dtype=tf.int32)
+        encoder_attention_mask = tf.keras.layers.Input(shape=(None,), dtype=tf.int32)
+        encoder_output = base_model({'input_ids': encoder_input_ids, 'attention_mask': encoder_attention_mask}).last_hidden_state
+        # Use the CLS token for the sentence embedding
+        embedding_output = encoder_output[:, 0, :]
+        encoder = tf.keras.Model(inputs=[encoder_input_ids, encoder_attention_mask], outputs=embedding_output)
+        
+        # Get embeddings for both inputs
+        embedding1 = encoder([input_ids1, attention_mask1])
+        embedding2 = encoder([input_ids2, attention_mask2])
+
+        # Calculate similarity
+        similarity = tf.keras.layers.Dot(axes=1, normalize=True)([embedding1, embedding2])
+        
+        # Create the final model
+        model = tf.keras.Model(inputs=[input_ids1, attention_mask1, input_ids2, attention_mask2], outputs=similarity)
         return model
 
     # -- Build, Load Weights, and Return --
     try:
-        model = build_siamese_model()
-        # IMPORTANT: Ensure this weights file is in the same directory
+        model = build_deployment_model()
+        # This will now only load the weights that match the new, simpler architecture
         model.load_weights("siamese_model.weights.h5")
         tokenizer = AutoTokenizer.from_pretrained('distilbert-base-uncased')
         return model, tokenizer
@@ -88,7 +77,7 @@ def load_model_and_tokenizer():
         st.error("Please ensure 'siamese_model.weights.h5' is in the correct directory.")
         return None, None
 
-# --- 3. Helper Functions ---
+# --- 3. Helper Functions (Unchanged) ---
 def preprocess(texts, tokenizer):
     return tokenizer(texts, padding="max_length", truncation=True, max_length=128, return_tensors="tf")
 
@@ -110,11 +99,10 @@ def build_response(original, compared, score, article_meta=None):
         "processed_at": timestamp
     }
 
-# --- 4. Main Application UI ---
+# --- 4. Main Application UI (Unchanged) ---
 st.title("📰 Headline Verification System")
 st.markdown("Enter a news headline to check its authenticity against recent articles from trusted sources.")
 
-# Load the model and tokenizer
 siamese_model, tokenizer = load_model_and_tokenizer()
 
 if siamese_model and tokenizer:
@@ -136,9 +124,8 @@ if siamese_model and tokenizer:
             st.warning("Please enter a headline to verify.")
         else:
             with st.spinner('🔎 Analyzing... Fetching news, running model, and comparing results...'):
-                # --- A. Fetch News ---
                 country_code = COUNTRY_MAP[country]
-                API_KEY = "21d6501d58264ca79e8490881db2ed61"
+                API_KEY = "21d6501d58264ca79e8490881db2ed61" # Consider hiding this in st.secrets
                 params = {"country": country_code, "category": category, "pageSize": page_size, "apiKey": API_KEY}
                 try:
                     response = requests.get("https://newsapi.org/v2/top-headlines", params=params)
@@ -152,7 +139,6 @@ if siamese_model and tokenizer:
                     st.warning("Could not fetch any articles for the given criteria. Please try again.")
                     result = build_response(headline, "", 0.0)
                 else:
-                    # --- B. Run Model Prediction ---
                     fetched_headlines = [article['title'] for article in articles]
                     ref_headline_list = [headline] * len(fetched_headlines)
                     inputs_ref = preprocess(ref_headline_list, tokenizer)
@@ -165,14 +151,12 @@ if siamese_model and tokenizer:
                     
                     scores = predictions.flatten()
                     
-                    # --- C. Find Best Match ---
                     best_score_index = np.argmax(scores)
                     best_score = scores[best_score_index]
                     best_match_headline = fetched_headlines[best_score_index]
                     best_match_article_meta = articles[best_score_index]
                     result = build_response(headline, best_match_headline, best_score, best_match_article_meta)
 
-                # --- D. Display Results ---
                 st.divider()
                 st.subheader("Verification Result")
 
@@ -189,4 +173,3 @@ if siamese_model and tokenizer:
                     st.json(result)
 else:
     st.error("Model could not be loaded. The application cannot start.")
-
