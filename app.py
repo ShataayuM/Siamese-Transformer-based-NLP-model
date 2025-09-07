@@ -66,7 +66,8 @@ def preprocess(texts, tokenizer):
 
 def build_response(original, compared, score, article_meta=None):
     timestamp = datetime.datetime.utcnow().isoformat() + "Z"
-    is_verified = score > 0.8
+    # Use a high threshold for the powerful pre-trained model to ensure accuracy
+    is_verified = score > 0.9 
     return {
         "verdict": "VERIFIED" if is_verified else "MISINFORMATION",
         "status": "✅ Verified" if is_verified else "🚫 Likely False / Misinformation",
@@ -91,44 +92,46 @@ siamese_model, tokenizer = load_model_and_tokenizer()
 if siamese_model and tokenizer:
     with st.form("verify_form"):
         headline = st.text_area("Headline to Verify", "", placeholder="e.g., New study shows coffee cures all diseases.")
+        # Country and PageSize are no longer used in the main API call but kept for UI consistency
         col1, col2, col3 = st.columns(3)
         with col1:
-            country = st.selectbox("Country", options=sorted(COUNTRY_MAP.keys()), index=list(sorted(COUNTRY_MAP.keys())).index('USA'))
+            country = st.selectbox("Country (for context)", options=sorted(COUNTRY_MAP.keys()), index=list(sorted(COUNTRY_MAP.keys())).index('USA'))
         with col2:
-            category = st.selectbox("Category", options=NEWS_CATEGORIES, index=2)
+            category = st.selectbox("Category (for context)", options=NEWS_CATEGORIES, index=2)
         with col3:
             page_size = st.number_input("Articles to check", min_value=5, max_value=100, value=20, step=5)
+        
         submitted = st.form_submit_button("Analyze Headline")
 
     if submitted:
         if not headline.strip():
             st.warning("Please enter a headline to verify.")
         else:
-            with st.spinner('🔎 Analyzing... Searching news sources...'):
+            with st.spinner('🔎 Analyzing... Searching all news sources...'):
+                # --- A. Fetch News using the more powerful /everything endpoint ---
                 API_KEY = "21d6501d58264ca79e8490881db2ed61"
-                country_code = COUNTRY_MAP[country]
+                
+                # --- *** THE FIX IS HERE: A single, powerful search *** ---
+                # We use the /everything endpoint as it's best for finding specific articles.
+                # The user's headline itself becomes the search query 'q'.
+                URL = "https://newsapi.org/v2/everything"
+                params = {
+                    "q": headline, 
+                    "searchIn": "title", # Focus the search on headlines for relevance
+                    "pageSize": page_size, 
+                    "language": "en", # Search for English articles
+                    "sortBy": "relevancy", # Get the most relevant articles first
+                    "apiKey": API_KEY
+                }
                 
                 articles = []
                 try:
-                    URL1 = "https://newsapi.org/v2/top-headlines"
-                    params1 = { "country": country_code, "category": category, "q": headline, "pageSize": page_size, "apiKey": API_KEY }
-                    response1 = requests.get(URL1, params=params1)
-                    response1.raise_for_status()
-                    articles.extend(response1.json().get("articles", []))
-
-                    if len(articles) < 5:
-                        URL2 = "https://newsapi.org/v2/everything"
-                        params2 = { "q": headline, "searchIn": "title", "pageSize": page_size, "apiKey": API_KEY }
-                        response2 = requests.get(URL2, params=params2)
-                        response2.raise_for_status()
-                        articles.extend(response2.json().get("articles", []))
+                    response = requests.get(URL, params=params)
+                    response.raise_for_status()
+                    articles = response.json().get("articles", [])
                 
                 except requests.exceptions.RequestException as e:
                     st.error(f"Could not connect to NewsAPI: {e}")
-
-                if articles:
-                    unique_articles = {article['url']: article for article in articles}.values()
-                    articles = list(unique_articles)
 
                 if not articles:
                     st.warning("Could not find any matching articles in trusted sources.")
